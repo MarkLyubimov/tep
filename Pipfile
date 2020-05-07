@@ -6,15 +6,19 @@ verify_ssl = true
 [dev-packages]
 
 [packages]
-pandas = "*"
-numpy = "*"
-matplotlib = "*"
-seaborn = "*"
-tqdm = "*"
+future = "*"
+graphviz = "*"
+hiddenlayer = "*"
 jupyter = "*"
+matplotlib = "*"
+numpy = "*"
+pandas = "*"
 pyreadr = "*"
-keras = "==2.1.5"
-tensorflow = {file = "https://storage.googleapis.com/tensorflow/mac/cpu/tensorflow-1.8.0-py3-none-any.whl"}
+scikit-learn = "*"
+seaborn = "*"
+torchviz = "*"
+tqdm = "*"
+tensorboard = "*"
 
 [requires]
 python_version = "3.6"
