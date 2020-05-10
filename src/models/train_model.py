@@ -3,6 +3,7 @@ import gc
 import sys
 import time
 import logging
+import argparse
 
 import pyreadr as py
 import pandas as pd
@@ -25,119 +26,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix
 
-
-class DataTEP(Dataset):
-
-    def __init__(self, X):
-        self.X = X
-        self.X = self.X.sort_values(['faultNumber', 'simulationRun', 'sample'])
-        self.X['index'] = self.X.groupby(['faultNumber', 'simulationRun']).ngroup()
-        self.X = self.X.set_index('index')
-
-        self.columns = [
-            'xmeas_1', 'xmeas_2', 'xmeas_3', 'xmeas_4', 'xmeas_5', 'xmeas_6', 'xmeas_7', 'xmeas_8',
-            'xmeas_9', 'xmeas_10', 'xmeas_11', 'xmeas_12', 'xmeas_13', 'xmeas_14', 'xmeas_15', 'xmeas_16',
-            'xmeas_17', 'xmeas_18', 'xmeas_19', 'xmeas_20', 'xmeas_21', 'xmeas_22', 'xmeas_23', 'xmeas_24',
-            'xmeas_25', 'xmeas_26', 'xmeas_27', 'xmeas_28', 'xmeas_29', 'xmeas_30', 'xmeas_31', 'xmeas_32',
-            'xmeas_33', 'xmeas_34', 'xmeas_35', 'xmeas_36', 'xmeas_37', 'xmeas_38', 'xmeas_39', 'xmeas_40',
-            'xmeas_41', 'xmv_1', 'xmv_2', 'xmv_3', 'xmv_4', 'xmv_5', 'xmv_6', 'xmv_7', 'xmv_8', 'xmv_9',
-            'xmv_10', 'xmv_11']
-
-    def __len__(self):
-        return self.X.index.max() + 1
-
-    def __getitem__(self, idx):
-        features = self.X.loc[idx][self.columns].values
-        target = self.X.loc[idx]['faultNumber'].unique()[0]
-
-        features = torch.tensor(features, dtype=torch.float)[-50:, :]
-        target = torch.tensor(target, dtype=torch.long)
-
-        return features, target
-
-
-class UniModel(torch.nn.Module):
-    def __init__(self, NUM_LAYERS, INPUT_SIZE, HIDDEN_SIZE, LINEAR_SIZE, OUTPUT_SIZE, BIDIRECTIONAL, DEVICE):
-        super().__init__()
-
-        self.hidden_size = HIDDEN_SIZE
-        self.num_layers = NUM_LAYERS
-        self.input_size = INPUT_SIZE
-        self.linear_size = LINEAR_SIZE
-        self.output_size = OUTPUT_SIZE
-        self.bidirectional = BIDIRECTIONAL
-
-        self.lstm = nn.LSTM(
-            input_size=self.input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            bidirectional=self.bidirectional,
-            batch_first=True,
-            dropout=0.4
-        )
-
-        self.head = nn.Sequential(
-            nn.Linear(in_features=self.hidden_size * (self.bidirectional + 1), out_features=self.linear_size),
-            nn.ReLU(),
-            nn.Dropout(p=0.4),
-            nn.Linear(in_features=self.linear_size, out_features=OUTPUT_SIZE),
-        )
-
-    def forward(self, x):
-        x, _ = self.lstm(x)
-        x = self.head(x[:, -1])
-
-        return x
-
-
-class TwinModel(torch.nn.Module):
-    def __init__(self, NUM_LAYERS, INPUT_SIZE, HIDDEN_SIZE, LINEAR_SIZE, OUTPUT_SIZE, BIDIRECTIONAL, DEVICE):
-        super().__init__()
-
-        self.hidden_size = HIDDEN_SIZE
-        self.num_layers = NUM_LAYERS
-        self.input_size = INPUT_SIZE
-        self.linear_size = LINEAR_SIZE
-        self.output_size = OUTPUT_SIZE
-        self.bidirectional = BIDIRECTIONAL
-
-        self.lstm_1 = nn.LSTM(
-            input_size=self.input_size[0],
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            bidirectional=self.bidirectional,
-            batch_first=True,
-            dropout=0.4
-        )
-
-        self.lstm_2 = nn.LSTM(
-            input_size=self.input_size[1],
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers,
-            bidirectional=self.bidirectional,
-            batch_first=True,
-            dropout=0.4
-        )
-
-        self.head = nn.Sequential(
-            nn.Linear(in_features=2 * self.hidden_size * (self.bidirectional + 1), out_features=self.linear_size),
-            nn.ReLU(),
-            nn.Dropout(p=0.4),
-            nn.Linear(in_features=self.linear_size, out_features=OUTPUT_SIZE),
-        )
-
-    def forward(self, x):
-        x_1 = x[:, :, :41]
-        x_2 = x[:, :, 41:]
-
-        x_1, _ = self.lstm_1(x_1)
-        x_2, __ = self.lstm_2(x_2)
-
-        x_3 = torch.cat((x_1[:, -1], x_2[:, -1]), dim=-1)
-
-        x = self.head(x_3)
-
-        return x
+from all_models import UniModel
+from data_utils import DataTEP, collate_fn
 
 
 def train_loop(model, optimizer, criterion, scheduler, train_dl, val_dl):
@@ -147,18 +37,20 @@ def train_loop(model, optimizer, criterion, scheduler, train_dl, val_dl):
     for epoch in range(NUM_EPOCHS):
 
         start = time.time()
-        logger.info(f'EPOCH: {epoch}, LR Rate: {scheduler.get_last_lr()[0]}\n')
+        print(f'Epoch: {epoch}, Learning Rate: {scheduler.get_last_lr()[0]}\n')
+        #     print(f'Epoch: {epoch}\n')
 
         loss_train_epoch, loss_val_epoch = 0, 0
         correct_train_epoch, correct_val_epoch = 0, 0
         n_train, n_val = 0, 0
 
         model.train()
-        for (X_batch_train, y_batch_train) in tqdm(train_dl):
-            X_batch_train, y_batch_train = X_batch_train.to(device), y_batch_train.to(device)
+        for (X_batch_train, X_batch_lengths_train, y_batch_train) in tqdm(train_dl):
+            X_batch_train, X_batch_lengths_train, y_batch_train = \
+                X_batch_train.to(device), X_batch_lengths_train.to(device), y_batch_train.to(device)
 
             optimizer.zero_grad()
-            y_pred_train = model(X_batch_train)
+            y_pred_train = model(X_batch_train, X_batch_lengths_train)
             loss_train = criterion(y_pred_train, y_batch_train)
             loss_train.backward()
             optimizer.step()
@@ -172,13 +64,11 @@ def train_loop(model, optimizer, criterion, scheduler, train_dl, val_dl):
 
         with torch.no_grad():
 
-            for item in model.parameters():
-                print(item.grad.mean())
+            for (X_batch_val, X_batch_lengths_val, y_batch_val) in tqdm(val_dl):
+                X_batch_val, X_batch_lengths_val, y_batch_val = \
+                    X_batch_val.to(device), X_batch_lengths_val.to(device), y_batch_val.to(device)
 
-            for (X_batch_val, y_batch_val) in tqdm(val_dl):
-                X_batch_val, y_batch_val = X_batch_val.to(device), y_batch_val.to(device)
-
-                y_pred_val = model(X_batch_val)
+                y_pred_val = model(X_batch_val, X_batch_lengths_val)
                 loss_val = criterion(y_pred_val, y_batch_val)
 
                 loss_val_epoch += loss_val.item() * y_batch_val.size()[0]
@@ -201,6 +91,7 @@ def train_loop(model, optimizer, criterion, scheduler, train_dl, val_dl):
         writer.add_scalars('ACCURACY per epoch', {"train": accuracy_train_epoch, "val": accuracy_val_epoch}, epoch)
 
         end = time.time()
+
         logger.info(f"epoch time: {end - start}")
         logger.info(f"mean loss train: {loss_mean_train_epoch}, mean loss val: {loss_mean_val_epoch}")
         logger.info(f"accuracy train: {accuracy_train_epoch}, accuracy val: {accuracy_val_epoch}")
@@ -213,10 +104,11 @@ def model_eval(model, val_dl):
     y_ans_val, y_true_val = [], []
 
     with torch.no_grad():
-        for (X_batch_val, y_batch_val) in tqdm(val_dl):
-            X_batch_val, y_batch_val = X_batch_val.to(device), y_batch_val.to(device)
+        for (X_batch_val, X_batch_lengths_val, y_batch_val) in tqdm(val_dl):
+            X_batch_val, X_batch_lengths_val, y_batch_val =\
+                X_batch_val.to(device), X_batch_lengths_val.to(device), y_batch_val.to(device)
 
-            y_pred_val = model(X_batch_val)
+            y_pred_val = model(X_batch_val, X_batch_lengths_val)
 
             y_pred_prob = F.softmax(y_pred_val.cpu(), dim=-1)
             y_pred_class = y_pred_prob.max(dim=-1)[1]
@@ -246,6 +138,12 @@ if __name__ == "__main__":
 
     logger.info(f'Script started')
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-l', '--sequence_length', nargs='+', type=int)
+
+    args = parser.parse_args()
+    configs = vars(args)
+
     device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
     logger.info(f'Selected GPU: {device}')
@@ -254,17 +152,18 @@ if __name__ == "__main__":
     logger.info("reading data")
     a1 = py.read_r("../../data/raw/dataverse_files/TEP_FaultFree_Training.RData")
     a2 = py.read_r("../../data/raw/dataverse_files/TEP_Faulty_Training.RData")
-    a3 = py.read_r("../../data/raw/dataverse_files/TEP_FaultFree_Testing.RData")
-    a4 = py.read_r("../../data/raw/dataverse_files/TEP_Faulty_Testing.RData")
+    # a3 = py.read_r("../../data/raw/dataverse_files/TEP_FaultFree_Testing.RData")
+    # a4 = py.read_r("../../data/raw/dataverse_files/TEP_Faulty_Testing.RData")
 
     # concatenating the train and the test dataset
     raw_train = pd.concat([a1['fault_free_training'], a2['faulty_training']])
-    raw_test = pd.concat([a3['fault_free_testing'], a4['faulty_testing']])
+    # raw_test = pd.concat([a3['fault_free_testing'], a4['faulty_testing']])
 
-    logger.info(f'raw_train size: {len(raw_train)}, raw_test size: {len(raw_test)}')
+    logger.info(f'raw_train size: {len(raw_train)}')
+    # logger.info(f'raw_test size: {len(raw_test)}')
 
     raw_train['index'] = raw_train['faultNumber'] * 500 + raw_train['simulationRun'] - 1
-    raw_test['index'] = raw_test['faultNumber'] * 500 + raw_test['simulationRun'] - 1
+    # raw_test['index'] = raw_test['faultNumber'] * 500 + raw_test['simulationRun'] - 1
 
     features = [
         'xmeas_1', 'xmeas_2', 'xmeas_3', 'xmeas_4', 'xmeas_5', 'xmeas_6', 'xmeas_7', 'xmeas_8',
@@ -287,7 +186,7 @@ if __name__ == "__main__":
 
     X_train = raw_train[raw_train['index'].isin(X_train_idx)].drop('index', axis=1)
     X_val = raw_train[raw_train['index'].isin(X_val_idx)].drop('index', axis=1)
-    X_test = raw_test.drop('index', axis=1)
+    # X_test = raw_test.drop('index', axis=1)
 
     logger.info("data scaling: training")
     scaler = StandardScaler()
@@ -296,22 +195,22 @@ if __name__ == "__main__":
     logger.info("data scaling: transforming")
     X_train[features] = scaler.transform(X_train[features])
     X_val[features] = scaler.transform(X_val[features])
-    X_test[features] = scaler.transform(X_test[features])
+    # X_test[features] = scaler.transform(X_test[features])
 
     logger.info("preparing datasets and dataloaders")
     BATCH_SIZE = 64
     NUM_CLASSES = 21
 
-    train_ds = DataTEP(X_train)
-    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    train_ds = DataTEP(X_train, configs['sequence_length'])
+    train_dl = DataLoader(train_ds, batch_size=BATCH_SIZE, collate_fn=collate_fn, shuffle=True)
 
-    val_ds = DataTEP(X_val)
-    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE * 4)
+    val_ds = DataTEP(X_val, configs['sequence_length'])
+    val_dl = DataLoader(val_ds, batch_size=BATCH_SIZE * 4, collate_fn=collate_fn)
 
-    test_ds = DataTEP(X_test)
-    test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE * 4)
+    # test_ds = DataTEP(X_test)
+    # test_dl = DataLoader(test_ds, batch_size=BATCH_SIZE*4, collate_fn=collate_fn)
 
-    NUM_EPOCHS = 5
+    NUM_EPOCHS = 1
     LEARNING_RATE = 0.001
 
     NUM_LAYERS = 2
@@ -320,10 +219,7 @@ if __name__ == "__main__":
     BIDIRECTIONAL = True
 
     model = UniModel(NUM_LAYERS=NUM_LAYERS, INPUT_SIZE=52, HIDDEN_SIZE=HIDDEN_SIZE,
-                     LINEAR_SIZE=LINEAR_SIZE, OUTPUT_SIZE=NUM_CLASSES, BIDIRECTIONAL=BIDIRECTIONAL, DEVICE=device)
-
-    # model = TwinModel(NUM_LAYERS=NUM_LAYERS, INPUT_SIZE=[41, 11], HIDDEN_SIZE=HIDDEN_SIZE,
-    #                  LINEAR_SIZE=LINEAR_SIZE, OUTPUT_SIZE=NUM_CLASSES, BIDIRECTIONAL=BIDIRECTIONAL, DEVICE=device)
+                     LINEAR_SIZE=LINEAR_SIZE, OUTPUT_SIZE=NUM_CLASSES, BIDIRECTIONAL=BIDIRECTIONAL)
 
     model = model.to(device)
 
