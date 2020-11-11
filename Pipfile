@@ -19,6 +19,8 @@ seaborn = "*"
 torchviz = "*"
 tqdm = "*"
 tensorboard = "*"
+torchsummary = "*"
+pytorch-model-summary = "*"
 
 [requires]
 python_version = "3.6"
